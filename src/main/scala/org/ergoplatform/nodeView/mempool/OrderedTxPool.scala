@@ -95,9 +95,24 @@ class OrderedTxPool(val orderedTransactions: TreeMap[WeightedTxId, UnconfirmedTr
     * @param unconfirmedTx - transaction to add
     * @return - modified pool
     */
+  private def outputsWithout(tx: ErgoTransaction): TreeMap[BoxId, WeightedTxId] =
+    tx.outputs.foldLeft(outputs) { case (acc, box) =>
+      acc.get(box.id) match {
+        case Some(wtx) if wtx.id == tx.id => acc - box.id
+        case _                            => acc
+      }
+    }
+
+  private def inputsWithout(tx: ErgoTransaction): TreeMap[BoxId, WeightedTxId] =
+    tx.inputs.foldLeft(inputs) { case (acc, inp) =>
+      acc.get(inp.boxId) match {
+        case Some(wtx) if wtx.id == tx.id => acc - inp.boxId
+        case _                            => acc
+      }
+    }
+
   def put(unconfirmedTx: UnconfirmedTransaction, feeFactor: Int): OrderedTxPool = {
     val tx = unconfirmedTx.transaction
-
     val newPool = transactionsRegistry.get(tx.id) match {
       case Some(wtx) =>
         val currentWtx = currentTransaction(tx.id).map(_._1).getOrElse(wtx)
@@ -142,20 +157,27 @@ class OrderedTxPool(val orderedTransactions: TreeMap[WeightedTxId, UnconfirmedTr
           withoutTransaction(tx.id),
           transactionsRegistry - tx.id,
           invalidatedTxIds,
-          outputs -- tx.outputs.map(_.id),
-          inputs -- tx.inputs.map(_.boxId)
+          outputsWithout(tx),
+          inputsWithout(tx)
         ).updateFamily(tx, -wtx.weight, System.currentTimeMillis(), depth = 0)
       case Some(_) =>
-        if (orderedTransactions.valuesIterator.exists(_.id == tx.id)) {
-          new OrderedTxPool(
-            withoutTransaction(tx.id),
-            transactionsRegistry - tx.id,
-            invalidatedTxIds,
-            outputs -- tx.outputs.map(_.id),
-            inputs -- tx.inputs.map(_.boxId)
-          )
-        } else {
-          this
+        currentTransaction(tx.id) match {
+          case Some((actualWtx, _)) =>
+            new OrderedTxPool(
+              withoutTransaction(tx.id),
+              transactionsRegistry - tx.id,
+              invalidatedTxIds,
+              outputsWithout(tx),
+              inputsWithout(tx)
+            ).updateFamily(tx, -actualWtx.weight, System.currentTimeMillis(), depth = 0)
+          case None =>
+            new OrderedTxPool(
+              orderedTransactions,
+              transactionsRegistry - tx.id,
+              invalidatedTxIds,
+              outputsWithout(tx),
+              inputsWithout(tx)
+            )
         }
       case None =>
         if (hasUnregisteredTransaction(tx.id)) {
@@ -163,8 +185,8 @@ class OrderedTxPool(val orderedTransactions: TreeMap[WeightedTxId, UnconfirmedTr
             withoutTransaction(tx.id),
             transactionsRegistry,
             invalidatedTxIds,
-            outputs -- tx.outputs.map(_.id),
-            inputs -- tx.inputs.map(_.boxId)
+            outputsWithout(tx),
+            inputsWithout(tx)
           )
         } else {
           this
@@ -185,20 +207,27 @@ class OrderedTxPool(val orderedTransactions: TreeMap[WeightedTxId, UnconfirmedTr
           withoutTransaction(tx.id),
           transactionsRegistry - tx.id,
           invalidatedTxIds.put(tx.id),
-          outputs -- tx.outputs.map(_.id),
-          inputs -- tx.inputs.map(_.boxId)
+          outputsWithout(tx),
+          inputsWithout(tx)
         ).updateFamily(tx, -wtx.weight, System.currentTimeMillis(), depth = 0)
       case Some(_) =>
-        if (orderedTransactions.valuesIterator.exists(utx => utx.id == tx.id)) {
-          new OrderedTxPool(
-            withoutTransaction(tx.id),
-            transactionsRegistry - tx.id,
-            invalidatedTxIds.put(tx.id),
-            outputs -- tx.outputs.map(_.id),
-            inputs -- tx.inputs.map(_.boxId)
-          )
-        } else {
-          new OrderedTxPool(orderedTransactions, transactionsRegistry, invalidatedTxIds.put(tx.id), outputs, inputs)
+        currentTransaction(tx.id) match {
+          case Some((actualWtx, _)) =>
+            new OrderedTxPool(
+              withoutTransaction(tx.id),
+              transactionsRegistry - tx.id,
+              invalidatedTxIds.put(tx.id),
+              outputsWithout(tx),
+              inputsWithout(tx)
+            ).updateFamily(tx, -actualWtx.weight, System.currentTimeMillis(), depth = 0)
+          case None =>
+            new OrderedTxPool(
+              orderedTransactions,
+              transactionsRegistry - tx.id,
+              invalidatedTxIds.put(tx.id),
+              outputsWithout(tx),
+              inputsWithout(tx)
+            )
         }
       case None =>
         if (hasUnregisteredTransaction(tx.id)) {
@@ -206,8 +235,8 @@ class OrderedTxPool(val orderedTransactions: TreeMap[WeightedTxId, UnconfirmedTr
             withoutTransaction(tx.id),
             transactionsRegistry,
             invalidatedTxIds.put(tx.id),
-            outputs -- tx.outputs.map(_.id),
-            inputs -- tx.inputs.map(_.boxId)
+            outputsWithout(tx),
+            inputsWithout(tx)
           )
         } else {
           new OrderedTxPool(orderedTransactions, transactionsRegistry, invalidatedTxIds.put(tx.id), outputs, inputs)
@@ -260,11 +289,11 @@ class OrderedTxPool(val orderedTransactions: TreeMap[WeightedTxId, UnconfirmedTr
       this
     } else {
 
-      val uniqueTxIds: Set[WeightedTxId] = tx.inputs.flatMap(input => this.outputs.get(input.boxId)).toSet
-      val parentTxs = uniqueTxIds.flatMap(wtx => this.orderedTransactions.get(wtx).map(ut => wtx -> ut))
+      val parentIds: Seq[ModifierId] =
+        tx.inputs.flatMap(input => this.outputs.get(input.boxId).map(_.id)).distinct
 
-      parentTxs.foldLeft(this) { case (pool, (snapshotWtx, _)) =>
-        pool.currentTransaction(snapshotWtx.id) match {
+      parentIds.foldLeft(this) { case (pool, parentId) =>
+        pool.currentTransaction(parentId) match {
           case Some((wtx, ut)) =>
             val parent = ut.transaction
             val newWtx = WeightedTxId(wtx.id, wtx.weight + weight, wtx.feePerFactor, wtx.created)

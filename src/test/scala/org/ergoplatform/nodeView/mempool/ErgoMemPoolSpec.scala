@@ -936,4 +936,30 @@ class ErgoMemPoolSpec extends AnyFlatSpec
     outcome4.isInstanceOf[ProcessingOutcome.DoubleSpendingLoser] shouldBe true
   }
 
+  it should "keep OrderedTxPool indices consistent across input replacements and stale registry cleanup (#1952)" in {
+    val tx1 = feeTx(1.toByte, 100000L)
+    val tx2 = feeTx(1.toByte, 200000L) // spends the same input box as tx1 with higher fee
+    val utx1 = UnconfirmedTransaction(tx1, None)
+    val utx2 = UnconfirmedTransaction(tx2, None)
+
+    val pool0 = ErgoMemPool.empty(settings)
+    val pool1 = pool0.put(utx1)
+    pool1.pool.orderedTransactions.size shouldBe 1
+    pool1.pool.transactionsRegistry.size shouldBe 1
+    pool1.pool.inputs.values.map(_.id).toSet shouldBe Set(tx1.id)
+
+    // Putting tx2 updates the shared input entry to point to tx2
+    val pool2 = pool1.put(utx2)
+    pool2.pool.orderedTransactions.size shouldBe 2
+    pool2.pool.transactionsRegistry.size shouldBe 2
+    pool2.pool.inputs.values.map(_.id).toSet shouldBe Set(tx2.id)
+
+    // Removing tx1 must not delete tx2's shared input from `inputs`
+    val pool3 = pool2.pool.remove(tx1)
+    pool3.orderedTransactions.size shouldBe 1
+    pool3.transactionsRegistry.size shouldBe 1
+    pool3.contains(tx1.id) shouldBe false
+    pool3.contains(tx2.id) shouldBe true
+    pool3.inputs.values.map(_.id).toSet shouldBe Set(tx2.id)
+  }
 }

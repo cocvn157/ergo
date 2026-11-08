@@ -125,8 +125,8 @@ class ErgoMemPool private[mempool](private[mempool] val pool: OrderedTxPool,
     val doubleSpentTransactionIds = tx.inputs.flatMap(i =>
       poolWithoutTx.pool.inputs.get(i.boxId)
     ).toSet
-    val doubleSpentTransactions = doubleSpentTransactionIds.flatMap { txId =>
-      poolWithoutTx.pool.orderedTransactions.get(txId)
+    val doubleSpentTransactions = doubleSpentTransactionIds.flatMap { wtx =>
+      poolWithoutTx.pool.get(wtx.id).orElse(poolWithoutTx.pool.orderedTransactions.get(wtx))
     }
     doubleSpentTransactions.foldLeft(poolWithoutTx) { case (pool, tx) =>
       removeTx(pool, tx.transaction)
@@ -207,7 +207,9 @@ class ErgoMemPool private[mempool](private[mempool] val pool: OrderedTxPool,
       val ownWtx = weighted(tx, feeF)
       val doubleSpendingTotalWeight = doubleSpendingWtxs.map(_.weight).sum / doubleSpendingWtxs.size
       if (ownWtx.weight > doubleSpendingTotalWeight) {
-        val doubleSpendingTxs = doubleSpendingWtxs.map(wtx => pool.orderedTransactions(wtx)).toSeq
+        val doubleSpendingTxs = doubleSpendingWtxs.flatMap(wtx =>
+          pool.get(wtx.id).orElse(pool.orderedTransactions.get(wtx))
+        ).toSeq
         val p = pool.remove(doubleSpendingTxs).put(unconfirmedTransaction, feeF)
         val updPool = new ErgoMemPool(p, stats, sortingOption)
         updPool -> new ProcessingOutcome.Accepted(unconfirmedTransaction, validationStartTime)
